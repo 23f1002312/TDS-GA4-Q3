@@ -14,38 +14,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 class Chunk(BaseModel):
     chunk_id: str
     text: str
 
-
-class Query(BaseModel):
+class RequestBody(BaseModel):
     question: str
     chunks: List[Chunk]
 
-
-STOPWORDS = {
-    "what","when","where","which","who","why","how","is","are","was","were",
-    "the","a","an","of","to","in","on","for","and","or","did","does","do",
-    "be","been","being","from","with","by","at","as","that","this","it"
-}
-
-
-def keywords(text):
-    words = re.findall(r"[A-Za-z0-9]+", text.lower())
-    return [w for w in words if w not in STOPWORDS]
-
-
-@app.get("/")
-def root():
-    return {"status": "ok"}
-
-
 @app.post("/")
-async def grounded_qa(req: Query):
-
-    if not req.question.strip() or len(req.chunks) == 0:
+async def grounded_qa(req: RequestBody):
+    if not req.question.strip() or not req.chunks:
         return {
             "answer": "I don't know",
             "citations": [],
@@ -53,27 +32,20 @@ async def grounded_qa(req: Query):
             "answerable": False,
         }
 
-    q_words = set(keywords(req.question))
+    q_words = set(re.findall(r"\w+", req.question.lower()))
 
     best_chunk = None
     best_score = 0
-    best_sentence = None
 
     for chunk in req.chunks:
+        words = set(re.findall(r"\w+", chunk.text.lower()))
+        score = len(q_words & words)
 
-        sentences = re.split(r'(?<=[.!?])\s+', chunk.text)
+        if score > best_score:
+            best_score = score
+            best_chunk = chunk
 
-        for sentence in sentences:
-
-            s_words = set(keywords(sentence))
-            score = len(q_words & s_words)
-
-            if score > best_score:
-                best_score = score
-                best_chunk = chunk
-                best_sentence = sentence.strip()
-
-    if best_score == 0:
+    if best_chunk is None or best_score == 0:
         return {
             "answer": "I don't know",
             "citations": [],
@@ -81,14 +53,9 @@ async def grounded_qa(req: Query):
             "answerable": False,
         }
 
-    confidence = min(
-        0.55 + 0.45 * best_score / max(len(q_words), 1),
-        0.99,
-    )
-
     return {
-        "answer": best_sentence,
+        "answer": best_chunk.text,
         "citations": [best_chunk.chunk_id],
-        "confidence": round(confidence, 2),
+        "confidence": min(0.5 + best_score / max(len(q_words), 1), 0.99),
         "answerable": True,
     }

@@ -6,7 +6,6 @@ import re
 
 app = FastAPI()
 
-# Allow CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,22 +26,35 @@ class RequestBody(BaseModel):
 
 
 STOPWORDS = {
-    "the", "a", "an", "is", "are", "was", "were",
-    "of", "to", "in", "on", "for", "and", "or",
-    "with", "by", "at", "from", "as", "that",
-    "this", "it", "be", "been", "being",
-    "what", "which", "who", "when", "where",
-    "why", "how", "do", "does", "did"
+    "the","a","an","is","are","was","were","of","to","in","on","for",
+    "and","or","with","by","at","from","as","that","this","it",
+    "be","been","being","do","does","did",
+    "what","which","who","when","where","why","how"
 }
 
 
 def tokenize(text):
-    words = re.findall(r"[A-Za-z0-9]+", text.lower())
     return [
-        w
-        for w in words
+        w for w in re.findall(r"[A-Za-z0-9]+", text.lower())
         if w not in STOPWORDS and len(w) > 2
     ]
+
+
+def expected_answer_present(question, sentence):
+    q = question.lower()
+    s = sentence
+
+    if "what year" in q or "when" in q:
+        return re.search(r"\b(19|20)\d{2}\b", s) is not None
+
+    if "how many" in q or "how much" in q:
+        return re.search(r"\b\d+(\.\d+)?\b", s) is not None
+
+    if q.startswith("who"):
+        # require at least one capitalized word
+        return re.search(r"\b[A-Z][a-z]+\b", s) is not None
+
+    return True
 
 
 @app.get("/")
@@ -51,10 +63,9 @@ def root():
 
 
 @app.post("/")
-async def grounded_qa(req: RequestBody):
+async def grounded(req: RequestBody):
 
-    # Invalid input
-    if not req.question.strip() or not req.chunks:
+    if not req.question.strip() or len(req.chunks) == 0:
         return {
             "answer": "I don't know",
             "citations": [],
@@ -64,19 +75,31 @@ async def grounded_qa(req: RequestBody):
 
     q_words = set(tokenize(req.question))
 
-    # -------------------------
-    # Score each chunk
-    # -------------------------
-    chunk_scores = []
+    best_chunk = None
+    best_sentence = None
+    best_score = 0
 
     for chunk in req.chunks:
-        score = len(set(tokenize(chunk.text)) & q_words)
-        chunk_scores.append((score, chunk))
 
-    max_score = max(score for score, _ in chunk_scores)
+        sentences = re.split(r'(?<=[.!?])\s+', chunk.text)
 
-    # Nothing matched
-    if max_score == 0:
+        for sentence in sentences:
+
+            s_words = set(tokenize(sentence))
+            overlap = len(q_words & s_words)
+
+            if overlap < 2:
+                continue
+
+            if not expected_answer_present(req.question, sentence):
+                continue
+
+            if overlap > best_score:
+                best_score = overlap
+                best_chunk = chunk
+                best_sentence = sentence.strip()
+
+    if best_chunk is None:
         return {
             "answer": "I don't know",
             "citations": [],
@@ -84,53 +107,14 @@ async def grounded_qa(req: RequestBody):
             "answerable": False,
         }
 
-    # Keep only best chunk(s)
-    best_chunks = [
-        chunk
-        for score, chunk in chunk_scores
-        if score == max_score
-    ]
-
-    answer_sentences = []
-    citations = []
-
-    for chunk in best_chunks:
-
-        citations.append(chunk.chunk_id)
-
-        sentences = re.split(r'(?<=[.!?])\s+', chunk.text)
-
-        best_sentence = ""
-        best_score = -1
-
-        for sentence in sentences:
-
-            score = len(set(tokenize(sentence)) & q_words)
-
-            if score > best_score:
-                best_score = score
-                best_sentence = sentence.strip()
-
-        if best_sentence:
-            answer_sentences.append(best_sentence)
-
-    # Remove duplicates while preserving order
-    seen = set()
-    final_answer = []
-
-    for sentence in answer_sentences:
-        if sentence not in seen:
-            seen.add(sentence)
-            final_answer.append(sentence)
-
     confidence = min(
-        0.60 + 0.08 * max_score,
-        0.99
+        0.55 + 0.08 * best_score,
+        0.99,
     )
 
     return {
-        "answer": " ".join(final_answer),
-        "citations": citations,
+        "answer": best_sentence,
+        "citations": [best_chunk.chunk_id],
         "confidence": round(confidence, 2),
         "answerable": True,
     }

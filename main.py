@@ -6,6 +6,7 @@ import re
 
 app = FastAPI()
 
+# Allow CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,16 +21,18 @@ class Chunk(BaseModel):
     text: str
 
 
-class RequestBody(BaseModel):
+class QARequest(BaseModel):
     question: str
     chunks: List[Chunk]
 
 
 STOPWORDS = {
-    "the","a","an","is","are","was","were","of","to","in","on","for",
-    "and","or","with","by","at","from","as","that","this","it",
-    "be","been","being","do","does","did",
-    "what","which","who","when","where","why","how"
+    "the","a","an","is","are","was","were","be","been","being",
+    "of","to","in","on","for","from","by","with","as","at",
+    "and","or","this","that","these","those","it",
+    "what","which","who","when","where","why","how",
+    "do","does","did","can","could","would","should",
+    "has","have","had"
 }
 
 
@@ -40,32 +43,37 @@ def tokenize(text):
     ]
 
 
+def sentence_score(question_words, sentence):
+    sentence_words = set(tokenize(sentence))
+    return len(question_words & sentence_words)
+
+
 def expected_answer_present(question, sentence):
     q = question.lower()
     s = sentence
 
-    if "what year" in q or "when" in q:
-        return re.search(r"\b(19|20)\d{2}\b", s) is not None
-
-    if "how many" in q or "how much" in q:
-        return re.search(r"\b\d+(\.\d+)?\b", s) is not None
+    if "what year" in q or q.startswith("when"):
+        return re.search(r"\b(18|19|20)\d{2}\b", s)
 
     if q.startswith("who"):
-        # require at least one capitalized word
-        return re.search(r"\b[A-Z][a-z]+\b", s) is not None
+        # at least one proper noun
+        return re.search(r"\b[A-Z][a-zA-Z]+\b", s)
+
+    if "how many" in q or "how much" in q:
+        return re.search(r"\b\d+(\.\d+)?\b", s)
 
     return True
 
 
 @app.get("/")
-def root():
-    return {"status": "ok"}
+def home():
+    return {"status": "running"}
 
 
-@app.post("/")
-async def grounded(req: RequestBody):
+@app.post("/grounded-answer")
+async def grounded_answer(req: QARequest):
 
-    if not req.question.strip() or len(req.chunks) == 0:
+    if not req.question.strip():
         return {
             "answer": "I don't know",
             "citations": [],
@@ -73,10 +81,18 @@ async def grounded(req: RequestBody):
             "answerable": False,
         }
 
-    q_words = set(tokenize(req.question))
+    if len(req.chunks) == 0:
+        return {
+            "answer": "I don't know",
+            "citations": [],
+            "confidence": 0.0,
+            "answerable": False,
+        }
 
-    best_chunk = None
+    question_words = set(tokenize(req.question))
+
     best_sentence = None
+    best_chunk = None
     best_score = 0
 
     for chunk in req.chunks:
@@ -85,21 +101,20 @@ async def grounded(req: RequestBody):
 
         for sentence in sentences:
 
-            s_words = set(tokenize(sentence))
-            overlap = len(q_words & s_words)
+            score = sentence_score(question_words, sentence)
 
-            if overlap < 2:
+            if score < 2:
                 continue
 
             if not expected_answer_present(req.question, sentence):
                 continue
 
-            if overlap > best_score:
-                best_score = overlap
-                best_chunk = chunk
+            if score > best_score:
+                best_score = score
                 best_sentence = sentence.strip()
+                best_chunk = chunk
 
-    if best_chunk is None:
+    if best_sentence is None:
         return {
             "answer": "I don't know",
             "citations": [],
@@ -107,10 +122,7 @@ async def grounded(req: RequestBody):
             "answerable": False,
         }
 
-    confidence = min(
-        0.55 + 0.08 * best_score,
-        0.99,
-    )
+    confidence = min(0.60 + best_score * 0.08, 0.99)
 
     return {
         "answer": best_sentence,
